@@ -60,7 +60,7 @@ st.caption("Forecast polymer import volume using manual input or Excel upload")
 def build_lstm_model(lookback, n_features):
     model = Sequential([
         LSTM(64, activation="tanh", input_shape=(lookback, n_features), return_sequences=False),
-        Dropout(0.1),
+        Dropout(0.2),
         Dense(32, activation="relu"),
         Dense(1)
     ])
