@@ -4,7 +4,6 @@ import numpy as np
 import joblib
 import matplotlib.pyplot as plt
 from io import BytesIO
-from datetime import date
 
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from tensorflow.keras.models import Sequential
@@ -40,10 +39,18 @@ h1, h2, h3 {
     border-radius: 16px;
     box-shadow: 0 2px 14px rgba(15, 23, 42, 0.06);
     border: 1px solid #e2e8f0;
+    margin-bottom: 1rem;
 }
 .small-note {
     color: #475569;
     font-size: 0.92rem;
+}
+.metric-card {
+    background: white;
+    padding: 1rem;
+    border-radius: 16px;
+    border: 1px solid #e2e8f0;
+    box-shadow: 0 2px 14px rgba(15, 23, 42, 0.06);
 }
 </style>
 """, unsafe_allow_html=True)
@@ -60,7 +67,7 @@ st.caption("Forecast polymer import volume using manual input or Excel upload")
 def build_lstm_model(lookback, n_features):
     model = Sequential([
         LSTM(64, activation="tanh", input_shape=(lookback, n_features), return_sequences=False),
-        Dropout(0.2),
+        Dropout(0.1),
         Dense(32, activation="relu"),
         Dense(1)
     ])
@@ -92,6 +99,12 @@ lookback = int(artifacts["lookback"])
 best_weight = float(artifacts["best_weight"])
 
 # =========================
+# Session State
+# =========================
+if "future_df" not in st.session_state:
+    st.session_state.future_df = None
+
+# =========================
 # Helpers
 # =========================
 MONTH_NAMES = {
@@ -100,12 +113,11 @@ MONTH_NAMES = {
     9: "September", 10: "October", 11: "November", 12: "December"
 }
 
-def first_day_of_month(year, month):
-    return pd.Timestamp(year=int(year), month=int(month), day=1)
-
 def get_allowed_max_date():
     today = pd.Timestamp.today().normalize()
-    return pd.Timestamp(today.year, 12, 1)
+    current_month_start = pd.Timestamp(today.year, today.month, 1)
+    max_date = current_month_start + pd.DateOffset(months=12)
+    return max_date
 
 def get_history_level_series(history_y_log):
     hist = pd.Series(np.exp(history_y_log.values), index=pd.to_datetime(history_y_log.index))
@@ -130,21 +142,17 @@ def validate_future_df(df, source_name="input"):
     if (df[["WTI_Price", "Exchange_Rate"]] <= 0).any().any():
         return False, "WTI_Price and Exchange_Rate must be positive values.", None
 
-    # force monthly first day
     if not all(df["Date"].dt.day == 1):
         return False, "Dates must represent month-level input using the first day of month.", None
 
-    # strictly future compared with last historical date
     history_last_date = pd.to_datetime(history_y.index.max())
     if (df["Date"] <= history_last_date).any():
         return False, f"Forecast dates must be after the latest historical date: {history_last_date.strftime('%Y-%m')}.", None
 
-    # consecutive monthly sequence
     expected_dates = pd.date_range(start=df["Date"].iloc[0], periods=len(df), freq="MS")
     if not df["Date"].reset_index(drop=True).equals(pd.Series(expected_dates)):
         return False, "Forecast periods must be continuous monthly dates without gaps.", None
 
-    # forecast horizon restriction
     max_allowed_date = get_allowed_max_date()
     if df["Date"].max() > max_allowed_date:
         return False, (
@@ -156,11 +164,9 @@ def validate_future_df(df, source_name="input"):
 
 def parse_uploaded_excel(uploaded_file):
     df = pd.read_excel(uploaded_file)
-
     cols = [c.strip() for c in df.columns]
     df.columns = cols
 
-    # support either Date column OR Year+Month columns
     if {"Year", "Month", "WTI_Price", "Exchange_Rate"}.issubset(df.columns):
         df["Date"] = pd.to_datetime(
             dict(year=df["Year"].astype(int), month=df["Month"].astype(int), day=1)
@@ -255,7 +261,6 @@ def run_forecast(future_input_df):
         weighted_list.append(np.exp(weighted_pred_log))
         dates.append(forecast_date)
 
-        # recursive update in log scale
         history_y_local = pd.concat([
             history_y_local,
             pd.Series([weighted_pred_log], index=[forecast_date])
@@ -331,7 +336,7 @@ def plot_history_and_forecast(result_df):
     return fig
 
 # =========================
-# Sidebar Info
+# Sidebar
 # =========================
 with st.sidebar:
     st.markdown("### Settings")
@@ -341,7 +346,7 @@ with st.sidebar:
         
         - Manual input: maximum **3 months**
         - Upload file: use for **more than 3 months**
-        - Maximum forecast month allowed: **{get_allowed_max_date().strftime('%Y-%m')}**
+        - Maximum allowed month: **{get_allowed_max_date().strftime('%Y-%m')}**
         """
     )
 
@@ -353,6 +358,10 @@ with st.sidebar:
         file_name="forecast_input_template.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+    if st.button("Clear Saved Input"):
+        st.session_state.future_df = None
+        st.rerun()
 
 # =========================
 # Input Section
@@ -367,18 +376,14 @@ st.markdown(
 
 tab1, tab2 = st.tabs(["Manual Input (Max 3 Months)", "Excel Upload"])
 
-future_df = None
-
 with tab1:
     st.markdown("#### Manual Input")
 
     current_year = pd.Timestamp.today().year
-    years_range = list(range(current_year, current_year + 2))
     month_options = list(range(1, 13))
-
     manual_rows = []
-    row_cols = st.columns([1.1, 1.1, 1.5, 1.5])
 
+    row_cols = st.columns([1.1, 1.1, 1.5, 1.5])
     with row_cols[0]:
         st.markdown("**Year**")
     with row_cols[1]:
@@ -436,7 +441,6 @@ with tab1:
     if manual_submit:
         manual_df = pd.DataFrame(manual_rows)
 
-        # keep only rows where both input values are provided and > 0
         manual_df = manual_df[
             (manual_df["WTI_Price"] > 0) &
             (manual_df["Exchange_Rate"] > 0)
@@ -454,7 +458,7 @@ with tab1:
 
             ok, msg, cleaned_df = validate_future_df(manual_df, "manual input")
             if ok:
-                future_df = cleaned_df
+                st.session_state.future_df = cleaned_df
                 st.success("Manual input is valid and ready for forecasting.")
                 st.dataframe(
                     cleaned_df.assign(
@@ -464,6 +468,7 @@ with tab1:
                     use_container_width=True
                 )
             else:
+                st.session_state.future_df = None
                 st.error(msg)
 
 with tab2:
@@ -483,7 +488,7 @@ with tab2:
 
             ok, msg, cleaned_df = validate_future_df(uploaded_df, "uploaded file")
             if ok:
-                future_df = cleaned_df
+                st.session_state.future_df = cleaned_df
                 st.success("Uploaded file is valid and ready for forecasting.")
                 st.dataframe(
                     cleaned_df.assign(
@@ -493,36 +498,48 @@ with tab2:
                     use_container_width=True
                 )
             else:
+                st.session_state.future_df = None
                 st.error(msg)
 
         except Exception as e:
+            st.session_state.future_df = None
             st.error(f"Upload error: {e}")
 
 st.markdown('</div>', unsafe_allow_html=True)
 
 # =========================
+# Show Current Saved Input
+# =========================
+if st.session_state.future_df is not None:
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader("Current Saved Forecast Input")
+    preview_df = st.session_state.future_df.copy()
+    preview_df["Year"] = preview_df["Date"].dt.year
+    preview_df["Month"] = preview_df["Date"].dt.month
+    st.dataframe(
+        preview_df[["Year", "Month", "WTI_Price", "Exchange_Rate"]],
+        use_container_width=True
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# =========================
 # Forecast Button
 # =========================
-st.markdown("")
 run_btn = st.button("Run Forecast", use_container_width=True)
 
 if run_btn:
-    if future_df is None:
+    if st.session_state.future_df is None:
         st.error("Please provide valid manual input or upload a valid Excel file first.")
     else:
         with st.spinner("Running forecast..."):
             try:
-                result_df = run_forecast(future_df)
+                result_df = run_forecast(st.session_state.future_df)
 
-                # KPI cards
                 st.markdown("## Forecast Summary")
                 c1, c2, c3 = st.columns(3)
 
                 with c1:
-                    st.metric(
-                        "Forecast Months",
-                        len(result_df)
-                    )
+                    st.metric("Forecast Months", len(result_df))
                 with c2:
                     st.metric(
                         "Last Forecast Month",
@@ -534,18 +551,15 @@ if run_btn:
                         f"{result_df['Weighted_Hybrid_Level'].iloc[-1]:,.2f}"
                     )
 
-                # Results table
                 st.markdown("## Forecast Results")
                 display_df = result_df.copy()
                 display_df["Date"] = pd.to_datetime(display_df["Date"]).dt.strftime("%Y-%m")
                 st.dataframe(display_df, use_container_width=True)
 
-                # Plot
                 st.markdown("## Historical and Forecast Plot")
                 fig = plot_history_and_forecast(result_df)
                 st.pyplot(fig)
 
-                # Download Excel
                 excel_file = create_excel_download(result_df)
                 st.download_button(
                     label="Download Forecast Results (Excel)",
